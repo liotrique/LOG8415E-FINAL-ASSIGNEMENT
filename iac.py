@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import json
 import boto3
 from botocore.exceptions import ClientError
 import paramiko
@@ -138,7 +139,10 @@ class EC2Manager:
         return self.worker_instances + [self.manager_instance, proxy_instance]
 
     def execute_commands(
-        self, commands: list[str], instances: list[EC2Instance]
+        self,
+        commands: list[str],
+        instances: list[EC2Instance],
+        print_output: bool = True,
     ) -> None:
         """
         This function executes a list of commands on each instance.
@@ -160,7 +164,8 @@ class EC2Manager:
 
                     # Process output in real-time
                     for line in iter(stdout.readline, ""):
-                        print(line, end="")  # Print each line from stdout
+                        if print_output:
+                            print(line, end="")  # Print each line from stdout
                     error_output = stderr.read().decode()  # Capture any error output
 
                     # Wait for command to complete
@@ -176,10 +181,11 @@ class EC2Manager:
             print(f"An error occurred: {e}")
 
     def install_common_dependencies(self):
-        my_sql_and_sakila_commands = [
-            # Update and Install MySQL Server
+        commands = [
+            # Update and Install MySQL, sysbench, and Flask
             "sudo apt-get update",
-            "sudo apt-get install -y mysql-server wget sysbench",
+            "sudo apt-get install -y mysql-server wget sysbench python3-pip",
+            "sudo pip3 install flask mysql-connector-python requests",
             # Set MySQL root password
             'sudo mysql -e \'ALTER USER "root"@"localhost" IDENTIFIED WITH mysql_native_password BY "root_password";\'',
             # Start and enable MySQL
@@ -194,10 +200,19 @@ class EC2Manager:
             # Verify that the Sakila database has been installed correctly
             "sudo mysql -u root -p'root_password' -e 'SHOW DATABASES;'",
             "sudo mysql -u root -p'root_password' -e 'USE sakila; SHOW TABLES;'",
+            # Add global environment variables to /etc/environment
+            'echo "MYSQL_USER=root" | sudo tee -a /etc/environment',
+            'echo "MYSQL_PASSWORD=root_password" | sudo tee -a /etc/environment',
+            'echo "MYSQL_DB=sakila" | sudo tee -a /etc/environment',
+            'echo "MYSQL_HOST=localhost" | sudo tee -a /etc/environment',
+            "source /etc/environment",
         ]
+
         # Execute commands
         self.execute_commands(
-            my_sql_and_sakila_commands, [self.manager_instance] + self.worker_instances
+            commands,
+            [self.manager_instance] + self.worker_instances,
+            print_output=False,
         )
 
     def run_sys_bench(self):
@@ -207,7 +222,9 @@ class EC2Manager:
         ]
         # Execute commands
         self.execute_commands(
-            sysbench_commands, [self.manager_instance] + self.worker_instances
+            sysbench_commands,
+            [self.manager_instance] + self.worker_instances,
+            print_output=False,
         )
 
     def save_sys_bench_results(self):
@@ -228,10 +245,79 @@ class EC2Manager:
                     f"Sysbench results downloaded to data/sysbench_results_{ec2_instance.get_name()}.txt"
                 )
 
-                scp.close()
-                ssh_client.close()
         except Exception as e:
             print(f"An error occurred: {e}")
+
+        finally:
+            scp.close()
+            ssh_client.close()
+
+    def create_database_and_table(self) -> None:
+        """
+        Create a database in the manager and the worker instances,
+        replacing it if it already exists, and create a table with initial data.
+        """
+        commands = [
+            # Drop the database if it exists, then create a new one
+            "sudo mysql -u root -p'root_password' -e 'DROP DATABASE IF EXISTS my_database;'",
+            "sudo mysql -u root -p'root_password' -e 'CREATE DATABASE my_database;'",
+            # Drop the table if it exists, then create a new table
+            "sudo mysql -u root -p'root_password' -e 'USE my_database; DROP TABLE IF EXISTS my_table;'",
+            "sudo mysql -u root -p'root_password' -e 'USE my_database; CREATE TABLE my_table (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255));'",
+            # Insert some data into the table
+            'sudo mysql -u root -p\'root_password\' -e \'USE my_database; INSERT INTO my_table (name) VALUES ("Alice"), ("Bob"), ("Charlie");\'',
+        ]
+
+        # Execute commands
+        self.execute_commands(commands, [self.manager_instance] + self.worker_instances)
+
+    def upload_flask_apps_to_instances(self):
+        try:
+            # Upload the Flask app to the manager instance
+            ssh_client = create_ssh_client(
+                self.manager_instance.instance.public_ip_address,
+                "ubuntu",
+                self.ssh_key_path,
+            )
+            scp = SCPClient(ssh_client.get_transport())
+            scp.put("scripts/manager_script.py", "manager_script.py")
+            scp.put("public_ips.json", "public_ips.json")
+
+        except Exception as e:
+            print(f"An error occurred: {e}")
+
+        finally:
+            scp.close()
+            ssh_client.close()
+
+        # Upload worker script to worker instances
+        for worker in self.worker_instances:
+            try:
+                ssh_client = create_ssh_client(
+                    worker.instance.public_ip_address, "ubuntu", self.ssh_key_path
+                )
+                scp = SCPClient(ssh_client.get_transport())
+                scp.put("scripts/worker_script.py", "worker_script.py")
+            except Exception as e:
+                print(
+                    f"Error uploading and starting worker script on {worker.get_name()}: {e}"
+                )
+            finally:
+                scp.close()
+                ssh_client.close()
+
+    def start_db_cluster_apps(self):
+        # Start the Flask app on the manager instance
+        commands = [
+            "nohup python3 manager_script.py > manager_output.log 2>&1 &",
+        ]
+        self.execute_commands(commands, [self.manager_instance])
+
+        # Start the Flask app on the worker instances
+        commands = [
+            "nohup python3 worker_script.py > worker_output.log 2>&1 &",
+        ]
+        self.execute_commands(commands, self.worker_instances)
 
     def cleanup(self, all_instances: list[EC2Instance]):
         """
@@ -256,6 +342,7 @@ class EC2Manager:
 
             # Delete key pair
             self.ec2_client.delete_key_pair(KeyName=self.key_name)
+            os.remove(self.ssh_key_path)
 
         except ClientError as e:
             print(f"An error occurred: {e}")
@@ -271,6 +358,12 @@ class EC2Manager:
                     "IpProtocol": "tcp",
                     "FromPort": 22,  # SSH
                     "ToPort": 22,
+                    "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 5000,  # Workers and manager listen on port 5000
+                    "ToPort": 5000,
                     "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
                 },
             ],
@@ -303,6 +396,10 @@ class EC2Manager:
 # Launch instances
 ec2_manager = EC2Manager()
 
+# Clear data folder
+os.system("rm -rf data")
+os.system("mkdir data")
+
 ec2_manager.create_key_pair()
 time.sleep(5)
 all_instances = ec2_manager.launch_instances()
@@ -315,13 +412,39 @@ for ec2_instance in all_instances:
     print(f"Instance {ec2_instance.get_name()} is running.")
 
 print("All instances are running.")
-
 time.sleep(10)
 
+# Save public IPs to a JSON file
+instance_data = {}
+
+for worker in ec2_manager.worker_instances:
+    instance_data[worker.name] = worker.instance.public_ip_address
+
+with open("public_ips.json", "w") as file:
+    json.dump(instance_data, file, indent=4)
+
+with open("manager_ip.txt", "w") as file:
+    file.write(ec2_manager.manager_instance.instance.public_ip_address)
+
 # Install dependencies common to each instance
+print("Installing common dependencies...")
 ec2_manager.install_common_dependencies()
+
+print("Running sysbench...")
 ec2_manager.run_sys_bench()
+
+print("Saving sysbench results...")
 ec2_manager.save_sys_bench_results()
+
+print("Creating database and table...")
+ec2_manager.create_database_and_table()
+
+print("Uploading Flask apps to instances...")
+ec2_manager.upload_flask_apps_to_instances()
+
+print("Starting Flask apps for the manager and workers...")
+ec2_manager.start_db_cluster_apps()
+
 
 # Cleanup
 press_touched = input("Press any key to terminate and cleanup: ")
