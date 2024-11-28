@@ -114,7 +114,7 @@ class EC2Manager:
         )
 
         # Launch proxy instance
-        proxy_instance = EC2Instance(
+        self.proxy_instance = EC2Instance(
             self.ec2_resource.create_instances(
                 ImageId=self.ami_id,
                 InstanceType="t2.large",
@@ -136,7 +136,7 @@ class EC2Manager:
             name="proxy",
         )
 
-        return self.worker_instances + [self.manager_instance, proxy_instance]
+        return self.worker_instances + [self.manager_instance, self.proxy_instance]
 
     def execute_commands(
         self,
@@ -180,7 +180,7 @@ class EC2Manager:
         except Exception as e:
             print(f"An error occurred: {e}")
 
-    def install_common_dependencies(self):
+    def install_cluster_dependencies(self) -> None:
         commands = [
             # Update and Install MySQL, sysbench, and Flask
             "sudo apt-get update",
@@ -215,7 +215,18 @@ class EC2Manager:
             print_output=False,
         )
 
-    def run_sys_bench(self):
+    def install_proxy_dependencies(self) -> None:
+        commands = [
+            # Update and Install Python3 and flask
+            "sudo apt-get update",
+            "sudo apt-get install -y python3-pip",
+            "sudo pip3 install flask requests",
+        ]
+
+        # Execute commands
+        self.execute_commands(commands, [self.proxy_instance], print_output=False)
+
+    def run_sys_bench(self) -> None:
         sysbench_commands = [
             "sudo sysbench /usr/share/sysbench/oltp_read_only.lua --mysql-db=sakila --mysql-user='root' --mysql-password='root_password' prepare",
             "sudo sysbench /usr/share/sysbench/oltp_read_only.lua --mysql-db=sakila --mysql-user='root' --mysql-password='root_password' run > sysbench_results.txt",
@@ -227,7 +238,7 @@ class EC2Manager:
             print_output=False,
         )
 
-    def save_sys_bench_results(self):
+    def save_sys_bench_results(self) -> None:
         try:
             for ec2_instance in [self.manager_instance] + self.worker_instances:
                 # Connect to the instance
@@ -251,25 +262,6 @@ class EC2Manager:
         finally:
             scp.close()
             ssh_client.close()
-
-    def create_database_and_table(self) -> None:
-        """
-        Create a database in the manager and the worker instances,
-        replacing it if it already exists, and create a table with initial data.
-        """
-        commands = [
-            # Drop the database if it exists, then create a new one
-            "sudo mysql -u root -p'root_password' -e 'DROP DATABASE IF EXISTS my_database;'",
-            "sudo mysql -u root -p'root_password' -e 'CREATE DATABASE my_database;'",
-            # Drop the table if it exists, then create a new table
-            "sudo mysql -u root -p'root_password' -e 'USE my_database; DROP TABLE IF EXISTS my_table;'",
-            "sudo mysql -u root -p'root_password' -e 'USE my_database; CREATE TABLE my_table (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255));'",
-            # Insert some data into the table
-            'sudo mysql -u root -p\'root_password\' -e \'USE my_database; INSERT INTO my_table (name) VALUES ("Alice"), ("Bob"), ("Charlie");\'',
-        ]
-
-        # Execute commands
-        self.execute_commands(commands, [self.manager_instance] + self.worker_instances)
 
     def upload_flask_apps_to_instances(self):
         try:
@@ -306,6 +298,24 @@ class EC2Manager:
                 scp.close()
                 ssh_client.close()
 
+        # Upload proxy script to proxy instance
+        try:
+            ssh_client = create_ssh_client(
+                self.proxy_instance.instance.public_ip_address,
+                "ubuntu",
+                self.ssh_key_path,
+            )
+            scp = SCPClient(ssh_client.get_transport())
+            scp.put("scripts/proxy_script.py", "proxy_script.py")
+            scp.put("public_ips.json", "public_ips.json")
+
+        except Exception as e:
+            print(f"An error occurred: {e}")
+
+        finally:
+            scp.close()
+            ssh_client.close()
+
     def start_db_cluster_apps(self):
         # Start the Flask app on the manager instance
         commands = [
@@ -318,6 +328,13 @@ class EC2Manager:
             "nohup python3 worker_script.py > worker_output.log 2>&1 &",
         ]
         self.execute_commands(commands, self.worker_instances)
+
+    def start_proxy_app(self) -> None:
+        # Start the Flask app on the proxy instance
+        commands = [
+            "nohup python3 proxy_script.py > proxy_output.log 2>&1 &",
+        ]
+        self.execute_commands(commands, [self.proxy_instance])
 
     def cleanup(self, all_instances: list[EC2Instance]):
         """
@@ -414,21 +431,24 @@ for ec2_instance in all_instances:
 print("All instances are running.")
 time.sleep(10)
 
-# Save public IPs to a JSON file
+# Save manager and worker ips to a JSON file
 instance_data = {}
 
-for worker in ec2_manager.worker_instances:
-    instance_data[worker.name] = worker.instance.public_ip_address
+for ec2_instance in (
+    ec2_manager.worker_instances
+    + [ec2_manager.manager_instance]
+    + [ec2_manager.proxy_instance]
+):
+    instance_data[ec2_instance.name] = ec2_instance.instance.public_ip_address
 
 with open("public_ips.json", "w") as file:
     json.dump(instance_data, file, indent=4)
 
-with open("manager_ip.txt", "w") as file:
-    file.write(ec2_manager.manager_instance.instance.public_ip_address)
+print("Installing cluster dependencies...")
+ec2_manager.install_cluster_dependencies()
 
-# Install dependencies common to each instance
-print("Installing common dependencies...")
-ec2_manager.install_common_dependencies()
+print("Installing proxy dependencies...")
+ec2_manager.install_proxy_dependencies()
 
 print("Running sysbench...")
 ec2_manager.run_sys_bench()
@@ -436,15 +456,14 @@ ec2_manager.run_sys_bench()
 print("Saving sysbench results...")
 ec2_manager.save_sys_bench_results()
 
-print("Creating database and table...")
-ec2_manager.create_database_and_table()
-
 print("Uploading Flask apps to instances...")
 ec2_manager.upload_flask_apps_to_instances()
 
 print("Starting Flask apps for the manager and workers...")
 ec2_manager.start_db_cluster_apps()
 
+print("Starting Flask app for the proxy...")
+ec2_manager.start_proxy_app()
 
 # Cleanup
 press_touched = input("Press any key to terminate and cleanup: ")

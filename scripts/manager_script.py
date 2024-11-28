@@ -56,23 +56,47 @@ def query():
             cursor.execute(query)
             conn.commit()
 
-            app.logger.info("Write query executed successfully")
+            app.logger.info(
+                "Write query executed successfully by manager (replicated on workers)"
+            )
 
             # Contact the workers with the write query
-            for ip in public_ips:
+            for (
+                name,
+                ip,
+            ) in public_ips.items():  # Access both key (worker name) and value (IP)
+                if not name.startswith("worker"):
+                    continue
                 response = requests.post(
                     f"http://{ip}:5000/query",
                     json={"query": query},
                 )
-                app.logger.info(f"Response from worker {ip}: {response.json()}")
+                app.logger.info(
+                    f"Response from worker {name} ({ip}): {response.json()}"
+                )
 
-            return jsonify({"message": "Write query executed successfully"}), 200
+            return (
+                jsonify(
+                    {
+                        "message": "Write query executed successfully by manager (replicated on workers)"
+                    }
+                ),
+                200,
+            )
         else:
             # For read queries, execute and fetch the result
             cursor.execute(query)
             result = cursor.fetchall()
-            app.logger.info("Read query executed successfully")
-            return jsonify(result), 200
+
+            app.logger.info("Read query executed successfully by manager")
+
+            # Add information to indicate that the response was handled by the manager
+            response_data = {
+                "handled_by": "manager",  # Indicates it was handled by the manager
+                "query_result": result,
+            }
+
+            return jsonify(response_data), 200
 
     except Exception as e:
         app.logger.error(f"Error executing query: {e}")
@@ -85,4 +109,4 @@ def query():
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)
