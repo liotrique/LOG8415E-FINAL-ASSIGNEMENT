@@ -1,4 +1,4 @@
-import os
+import time
 import requests
 import json
 from flask import Flask, request, jsonify
@@ -9,14 +9,6 @@ import random
 mode = "DIRECT_HIT"
 
 app = Flask(__name__)
-
-# MySQL configurations (using environment variables for security)
-app.config["MYSQL_DATABASE_USER"] = os.getenv("MYSQL_USER", "root")
-app.config["MYSQL_DATABASE_PASSWORD"] = os.getenv("MYSQL_PASSWORD", "root_password")
-app.config["MYSQL_DATABASE_DB"] = os.getenv(
-    "MYSQL_DB", "sakila"
-)  # Change to your database
-app.config["MYSQL_DATABASE_HOST"] = os.getenv("MYSQL_HOST", "localhost")
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -45,29 +37,55 @@ def query():
         )
 
         if is_write_query:
-            # Send it to the manager instance
             url = f"http://{public_ips['manager']}:5000/query"
             response = requests.post(url, json={"query": query})
-            return response.json(), response.status_code
+            response_data = {}
+            response_data["handled_by"] = "manager"
+            response_data["result"] = response.json()
+            return jsonify(response_data), response.status_code
 
         else:
-            # Use app.config to get the mode
-            mode = app.config.get("MODE", "DIRECT_HIT")
+            global mode
 
             if mode == "DIRECT_HIT":
                 url = f"http://{public_ips['manager']}:5000/query"
                 response = requests.post(url, json={"query": query})
-                return response.json(), response.status_code
+                response_data = {}
+                response_data["handled_by"] = "manager"
+                response_data["result"] = response.json()
+                return jsonify(response_data), response.status_code
 
             elif mode == "RANDOM":
-                ip = random.choice(list(public_ips.values()))
+                target = random.choice(list(public_ips))
+                ip = public_ips[target]
                 url = f"http://{ip}:5000/query"
                 response = requests.post(url, json={"query": query})
-                return response.json(), response.status_code
+                response_data = {}
+                response_data["handled_by"] = target
+                response_data["result"] = response.json()
+                return jsonify(response_data), response.status_code
 
-            else:
-                # TODO: implement a customized mode
-                pass
+            elif mode == "CUSTOMIZED":
+                ping = {}
+                for key, ip in public_ips.items():
+                    if key.startswith("proxy"):
+                        continue
+                    try:
+                        start_time = time.time()
+                        requests.get(f"http://{ip}:5000/", timeout=2)
+                        ping[key] = time.time() - start_time
+                    except requests.exceptions.RequestException:
+                        ping[key] = float("inf")
+
+                worker_name = min(ping, key=ping.get)
+                ip = public_ips[worker_name]
+                url = f"http://{ip}:5000/query"
+                response = requests.post(url, json={"query": query})
+                response_data = {}
+                response_data["handled_by"] = worker_name
+                response_data["result"] = response.json()
+                response_data["pings"] = ping
+                return jsonify(response_data), response.status_code
 
     except Exception as e:
         app.logger.error(f"Error executing query: {e}")

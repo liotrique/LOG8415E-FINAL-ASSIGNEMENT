@@ -8,9 +8,7 @@ app = Flask(__name__)
 # MySQL configurations (using environment variables for security)
 app.config["MYSQL_DATABASE_USER"] = os.getenv("MYSQL_USER", "root")
 app.config["MYSQL_DATABASE_PASSWORD"] = os.getenv("MYSQL_PASSWORD", "root_password")
-app.config["MYSQL_DATABASE_DB"] = os.getenv(
-    "MYSQL_DB", "sakila"
-)  # Change to your database
+app.config["MYSQL_DATABASE_DB"] = os.getenv("MYSQL_DB", "sakila")
 app.config["MYSQL_DATABASE_HOST"] = os.getenv("MYSQL_HOST", "localhost")
 
 # Set up logging
@@ -58,11 +56,8 @@ def query():
             cursor.execute(query)
             result = cursor.fetchall()
             app.logger.info("Read query executed successfully")
-            response_data = {
-                "handled_by": "worker",  # Indicates it was handled by a worker # TODO: Add worker id
-                "query_result": result,
-            }
-            return jsonify(response_data), 200
+
+            return jsonify(result), 200
 
     except Exception as e:
         app.logger.error(f"Error executing query: {e}")
