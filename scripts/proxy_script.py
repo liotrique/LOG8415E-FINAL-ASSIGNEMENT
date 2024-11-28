@@ -17,6 +17,13 @@ logging.basicConfig(level=logging.INFO)
 with open("public_ips.json", "r") as f:
     public_ips = json.load(f)
 
+# filter out the ones that are not workers or manager
+public_ips = {
+    key: value
+    for key, value in public_ips.items()
+    if key.startswith(("worker", "manager"))
+}
+
 
 @app.route("/", methods=["GET"])
 def home():

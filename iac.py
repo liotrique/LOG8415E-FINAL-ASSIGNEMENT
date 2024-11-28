@@ -27,9 +27,7 @@ def create_ssh_client(host, user, key_path):
 
 
 class EC2Manager:
-
     def __init__(self):
-
         self.key_name = "temp_key_pair"
 
         # Clients and resources
@@ -40,19 +38,39 @@ class EC2Manager:
         self.vpc_id = self.ec2_client.describe_vpcs()["Vpcs"][0]["VpcId"]
         self.ami_id = self._get_latest_ubuntu_ami()
 
-        self.security_group_id = self.ec2_client.create_security_group(
-            Description="Common security group",
+        # Security groups
+        self.cluster_security_group_id = self.ec2_client.create_security_group(
+            Description="Security group for manager and workers",
             GroupName="common_sg",
             VpcId=self.vpc_id,
         )["GroupId"]
 
-        self._add_inboud_rule_security_group()
+        self.proxy_security_group_id = self.ec2_client.create_security_group(
+            Description="Proxy security group",
+            GroupName="proxy_sg",
+            VpcId=self.vpc_id,
+        )["GroupId"]
+
+        self.trusted_host_security_group_id = self.ec2_client.create_security_group(
+            Description="Trusted host security group",
+            GroupName="trusted_host_sg",
+            VpcId=self.vpc_id,
+        )["GroupId"]
+
+        self.gatekeeper_security_group_id = self.ec2_client.create_security_group(
+            Description="Gatekeeper security group",
+            GroupName="gatekeeper_sg",
+            VpcId=self.vpc_id,
+        )["GroupId"]
+
         self.ssh_key_path = os.path.expanduser(f"./{self.key_name}.pem")
 
         # All instances
         self.manager_instance: EC2Instance | None = None
         self.worker_instances: list[EC2Instance] | None = []
         self.proxy_instance: EC2Instance | None = None
+        self.gatekeeper_instance: EC2Instance | None = None
+        self.trusted_host_instance: EC2Instance | None = None
 
     def create_key_pair(self) -> None:
         response = self.ec2_client.create_key_pair(KeyName=self.key_name)
@@ -62,7 +80,7 @@ class EC2Manager:
 
     def launch_instances(self) -> list[EC2Instance]:
         """
-        Launch instance
+        Launch manager, worker, and proxy instances
         """
         # Launch worker instances
         for i in range(2):
@@ -73,7 +91,7 @@ class EC2Manager:
                         InstanceType="t2.micro",
                         MinCount=1,
                         MaxCount=1,
-                        SecurityGroupIds=[self.security_group_id],
+                        SecurityGroupIds=[self.cluster_security_group_id],
                         KeyName=self.key_name,
                         BlockDeviceMappings=[
                             {
@@ -97,7 +115,7 @@ class EC2Manager:
                 InstanceType="t2.micro",
                 MinCount=1,
                 MaxCount=1,
-                SecurityGroupIds=[self.security_group_id],
+                SecurityGroupIds=[self.cluster_security_group_id],
                 KeyName=self.key_name,
                 BlockDeviceMappings=[
                     {
@@ -120,7 +138,7 @@ class EC2Manager:
                 InstanceType="t2.large",
                 MinCount=1,
                 MaxCount=1,
-                SecurityGroupIds=[self.security_group_id],
+                SecurityGroupIds=[self.proxy_security_group_id],
                 KeyName=self.key_name,
                 BlockDeviceMappings=[
                     {
@@ -136,7 +154,151 @@ class EC2Manager:
             name="proxy",
         )
 
-        return self.worker_instances + [self.manager_instance, self.proxy_instance]
+        # Launch trusted host instance
+        self.trusted_host_instance = EC2Instance(
+            self.ec2_resource.create_instances(
+                ImageId=self.ami_id,
+                InstanceType="t2.large",
+                MinCount=1,
+                MaxCount=1,
+                SecurityGroupIds=[self.trusted_host_security_group_id],
+                KeyName=self.key_name,
+                BlockDeviceMappings=[
+                    {
+                        "DeviceName": "/dev/sda1",
+                        "Ebs": {
+                            "VolumeSize": 16,
+                            "VolumeType": "gp3",
+                            "DeleteOnTermination": True,
+                        },
+                    }
+                ],
+            )[0],
+            name="trusted_host",
+        )
+
+        # Launch gatekeeper instance
+        self.gatekeeper_instance = EC2Instance(
+            self.ec2_resource.create_instances(
+                ImageId=self.ami_id,
+                InstanceType="t2.large",
+                MinCount=1,
+                MaxCount=1,
+                SecurityGroupIds=[self.gatekeeper_security_group_id],
+                KeyName=self.key_name,
+                BlockDeviceMappings=[
+                    {
+                        "DeviceName": "/dev/sda1",
+                        "Ebs": {
+                            "VolumeSize": 16,
+                            "VolumeType": "gp3",
+                            "DeleteOnTermination": True,
+                        },
+                    }
+                ],
+            )[0],
+            name="gatekeeper",
+        )
+
+        return self.worker_instances + [
+            self.manager_instance,
+            self.proxy_instance,
+            self.trusted_host_instance,
+            self.gatekeeper_instance,
+        ]
+
+    def add_inbound_rules(self):
+        """
+        Add inbound rules for security groups
+        """
+        # Allow SSH access to all instances
+        self.ec2_client.authorize_security_group_ingress(
+            GroupId=self.cluster_security_group_id,
+            IpPermissions=[
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 22,
+                    "ToPort": 22,
+                    "IpRanges": [
+                        {
+                            "CidrIp": "0.0.0.0/0",  # Allow SSH access from anywhere
+                        },
+                    ],
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 5000,
+                    "ToPort": 5000,
+                    "IpRanges": [  # Allow access from the proxy, and from the manager (for the workers)
+                        {
+                            "CidrIp": f"{self.manager_instance.instance.public_ip_address}/32"
+                        },
+                        {
+                            "CidrIp": f"{self.proxy_instance.instance.public_ip_address}/32"
+                        },
+                    ],
+                },
+            ],
+        )
+        self.ec2_client.authorize_security_group_ingress(
+            GroupId=self.proxy_security_group_id,
+            IpPermissions=[
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 22,
+                    "ToPort": 22,
+                    "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 5000,
+                    "ToPort": 5000,
+                    "IpRanges": [
+                        {
+                            "CidrIp": f"{self.trusted_host_instance.instance.public_ip_address}/32"  # Allow access from the trusted host
+                        }
+                    ],
+                },
+            ],
+        )
+        self.ec2_client.authorize_security_group_ingress(
+            GroupId=self.trusted_host_security_group_id,
+            IpPermissions=[
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 22,
+                    "ToPort": 22,
+                    "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 5000,
+                    "ToPort": 5000,
+                    "IpRanges": [
+                        {
+                            "CidrIp": f"{self.gatekeeper_instance.instance.public_ip_address}/32"  # Allow access from the gatekeeper
+                        }
+                    ],
+                },
+            ],
+        )
+        self.ec2_client.authorize_security_group_ingress(
+            GroupId=self.gatekeeper_security_group_id,
+            IpPermissions=[
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 22,
+                    "ToPort": 22,
+                    "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                },
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 5000,
+                    "ToPort": 5000,
+                    "IpRanges": [{"CidrIp": "0.0.0.0/0"}],  # Allow access from anywhere
+                },
+            ],
+        )
 
     def execute_commands(
         self,
@@ -215,7 +377,7 @@ class EC2Manager:
             print_output=False,
         )
 
-    def install_proxy_dependencies(self) -> None:
+    def install_network_instances_dependencies(self) -> None:
         commands = [
             # Update and Install Python3 and flask
             "sudo apt-get update",
@@ -224,7 +386,15 @@ class EC2Manager:
         ]
 
         # Execute commands
-        self.execute_commands(commands, [self.proxy_instance], print_output=False)
+        self.execute_commands(
+            commands,
+            [
+                self.proxy_instance
+                + self.trusted_host_instance
+                + self.gatekeeper_instance
+            ],
+            print_output=False,
+        )
 
     def run_sys_bench(self) -> None:
         sysbench_commands = [
@@ -316,6 +486,42 @@ class EC2Manager:
             scp.close()
             ssh_client.close()
 
+        # Upload trusted host script to trusted host instance
+        try:
+            ssh_client = create_ssh_client(
+                self.trusted_host_instance.instance.public_ip_address,
+                "ubuntu",
+                self.ssh_key_path,
+            )
+            scp = SCPClient(ssh_client.get_transport())
+            scp.put("scripts/trusted_host_script.py", "trusted_host_script.py")
+            scp.put("public_ips.json", "public_ips.json")
+
+        except Exception as e:
+            print(f"An error occurred: {e}")
+
+        finally:
+            scp.close()
+            ssh_client.close()
+
+        # Upload gatekeeper script to gatekeeper instance
+        try:
+            ssh_client = create_ssh_client(
+                self.gatekeeper_instance.instance.public_ip_address,
+                "ubuntu",
+                self.ssh_key_path,
+            )
+            scp = SCPClient(ssh_client.get_transport())
+            scp.put("scripts/gatekeeper_script.py", "gatekeeper_script.py")
+            scp.put("public_ips.json", "public_ips.json")
+
+        except Exception as e:
+            print(f"An error occurred: {e}")
+
+        finally:
+            scp.close()
+            ssh_client.close()
+
     def start_db_cluster_apps(self):
         # Start the Flask app on the manager instance
         commands = [
@@ -336,6 +542,20 @@ class EC2Manager:
         ]
         self.execute_commands(commands, [self.proxy_instance])
 
+    def start_trusted_host_app(self) -> None:
+        # Start the Flask app on the trusted host instance
+        commands = [
+            "nohup python3 trusted_host_script.py > trusted_host_output.log 2>&1 &",
+        ]
+        self.execute_commands(commands, [self.trusted_host_instance])
+
+    def start_gatekeeper_app(self) -> None:
+        # Start the Flask app on the gatekeeper instance
+        commands = [
+            "nohup python3 gatekeeper_script.py > gatekeeper_output.log 2>&1 &",
+        ]
+        self.execute_commands(commands, [self.gatekeeper_instance])
+
     def cleanup(self, all_instances: list[EC2Instance]):
         """
         Delete the target groups, terminate all instances and delete the security group.
@@ -353,9 +573,24 @@ class EC2Manager:
             waiter.wait(InstanceIds=instances_ids)
             print("Instances terminated.")
 
-            # Delete security group
-            self.ec2_client.delete_security_group(GroupId=self.security_group_id)
+            # Delete security groups
+            self.ec2_client.delete_security_group(
+                GroupId=self.cluster_security_group_id
+            )
             print(f"Security group {self.security_group_id} deleted.")
+
+            self.ec2_client.delete_security_group(GroupId=self.proxy_security_group_id)
+            print(f"Security group {self.proxy_security_group_id} deleted.")
+
+            self.ec2_client.delete_security_group(
+                GroupId=self.trusted_host_security_group_id
+            )
+            print(f"Security group {self.trusted_host_security_group_id} deleted.")
+
+            self.ec2_client.delete_security_group(
+                GroupId=self.gatekeeper_security_group_id
+            )
+            print(f"Security group {self.gatekeeper_security_group_id} deleted.")
 
             # Delete key pair
             self.ec2_client.delete_key_pair(KeyName=self.key_name)
@@ -363,28 +598,6 @@ class EC2Manager:
 
         except ClientError as e:
             print(f"An error occurred: {e}")
-
-    def _add_inboud_rule_security_group(self):
-        """
-        Add inbound rules to the security group to allow SSH and application port traffic.
-        """
-        self.ec2_client.authorize_security_group_ingress(
-            GroupId=self.security_group_id,
-            IpPermissions=[
-                {
-                    "IpProtocol": "tcp",
-                    "FromPort": 22,  # SSH
-                    "ToPort": 22,
-                    "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
-                },
-                {
-                    "IpProtocol": "tcp",
-                    "FromPort": 5000,  # Workers and manager listen on port 5000
-                    "ToPort": 5000,
-                    "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
-                },
-            ],
-        )
 
     def _get_latest_ubuntu_ami(self):
         """
@@ -431,14 +644,11 @@ for ec2_instance in all_instances:
 print("All instances are running.")
 time.sleep(10)
 
+ec2_manager.add_inbound_rules()
+
 # Save manager and worker ips to a JSON file
 instance_data = {}
-
-for ec2_instance in (
-    ec2_manager.worker_instances
-    + [ec2_manager.manager_instance]
-    + [ec2_manager.proxy_instance]
-):
+for ec2_instance in all_instances:
     instance_data[ec2_instance.name] = ec2_instance.instance.public_ip_address
 
 with open("public_ips.json", "w") as file:
@@ -448,7 +658,7 @@ print("Installing cluster dependencies...")
 ec2_manager.install_cluster_dependencies()
 
 print("Installing proxy dependencies...")
-ec2_manager.install_proxy_dependencies()
+ec2_manager.install_network_instances_dependencies()
 
 print("Running sysbench...")
 ec2_manager.run_sys_bench()
@@ -464,6 +674,12 @@ ec2_manager.start_db_cluster_apps()
 
 print("Starting Flask app for the proxy...")
 ec2_manager.start_proxy_app()
+
+print("Starting Flask app for the trusted host...")
+ec2_manager.start_trusted_host_app()
+
+print("Starting Flask app for the gatekeeper...")
+ec2_manager.start_gatekeeper_app()
 
 # Cleanup
 press_touched = input("Press any key to terminate and cleanup: ")
