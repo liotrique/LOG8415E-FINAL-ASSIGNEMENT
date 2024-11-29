@@ -3,6 +3,7 @@ import json
 import boto3
 from botocore.exceptions import ClientError
 import paramiko
+import requests
 from scp import SCPClient
 import time
 from typing import Any
@@ -24,6 +25,33 @@ def create_ssh_client(host, user, key_path):
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(hostname=host, username=user, key_filename=key_path)
     return ssh
+
+
+# Function to print stats from benchmark
+def print_stats(answers):
+
+    n_req_per_instance = {"manager": 0, "worker1": 0, "worker2": 0}
+    n_time_per_instance = {"manager": 0, "worker1": 0, "worker2": 0}
+    for answer in answers:
+        if answer["response"]["handled_by"] == "manager":
+            n_req_per_instance["manager"] += 1
+            n_time_per_instance["manager"] += answer["time"]
+        elif answer["response"]["handled_by"] == "worker1":
+            n_req_per_instance["worker1"] += 1
+            n_time_per_instance["worker1"] += answer["time"]
+        elif answer["response"]["handled_by"] == "worker2":
+            n_req_per_instance["worker2"] += 1
+            n_time_per_instance["worker2"] += answer["time"]
+
+    # Divide time per instance by n istance
+    for key in n_time_per_instance:
+        if n_req_per_instance[key] > 0:
+            n_time_per_instance[key] /= n_req_per_instance[key]
+
+    print("Number of requests per instance:")
+    print(n_req_per_instance)
+    print("Average response time per instance:")
+    print(n_time_per_instance)
 
 
 class EC2Manager:
@@ -388,11 +416,7 @@ class EC2Manager:
         # Execute commands
         self.execute_commands(
             commands,
-            [
-                self.proxy_instance
-                + self.trusted_host_instance
-                + self.gatekeeper_instance
-            ],
+            [self.proxy_instance, self.trusted_host_instance, self.gatekeeper_instance],
             print_output=False,
         )
 
@@ -556,6 +580,48 @@ class EC2Manager:
         ]
         self.execute_commands(commands, [self.gatekeeper_instance])
 
+    def set_mode(self, mode: str) -> None:
+        # Set the mode on the proxy instance
+        response = requests.post(
+            f"http://{self.gatekeeper_instance.instance.public_ip_address}:5000/mode",
+            json={"mode": mode},
+        )
+        print(response.json())
+
+    def benchmark(self) -> dict[str, Any]:
+        answers = []
+        # 1000 write queries
+        for i in range(1000):
+            initial_time = time.time()
+            response = requests.post(
+                f"http://{self.gatekeeper_instance.instance.public_ip_address}:5000/query",
+                json={
+                    "query": "INSERT INTO actor (first_name, last_name) VALUES ('John', 'Doe')"
+                },
+            )
+            answers.append(
+                {
+                    "time": time.time() - initial_time,
+                    "response": response.json(),
+                }
+            )
+
+        # 1000 read queries
+        for i in range(1000):
+            initial_time = time.time()
+            response = requests.post(
+                f"http://{self.gatekeeper_instance.instance.public_ip_address}:5000/query",
+                json={"query": "SELECT COUNT(*) AS total_entries FROM actor;"},
+            )
+            answers.append(
+                {
+                    "time": time.time() - initial_time,
+                    "response": response.json(),
+                }
+            )
+
+        return answers
+
     def cleanup(self, all_instances: list[EC2Instance]):
         """
         Delete the target groups, terminate all instances and delete the security group.
@@ -577,7 +643,7 @@ class EC2Manager:
             self.ec2_client.delete_security_group(
                 GroupId=self.cluster_security_group_id
             )
-            print(f"Security group {self.security_group_id} deleted.")
+            print(f"Security group {self.cluster_security_group_id} deleted.")
 
             self.ec2_client.delete_security_group(GroupId=self.proxy_security_group_id)
             print(f"Security group {self.proxy_security_group_id} deleted.")
@@ -657,7 +723,7 @@ with open("public_ips.json", "w") as file:
 print("Installing cluster dependencies...")
 ec2_manager.install_cluster_dependencies()
 
-print("Installing proxy dependencies...")
+print("Installing proxy, trusted host and gatekeeper dependencies...")
 ec2_manager.install_network_instances_dependencies()
 
 print("Running sysbench...")
@@ -681,7 +747,32 @@ ec2_manager.start_trusted_host_app()
 print("Starting Flask app for the gatekeeper...")
 ec2_manager.start_gatekeeper_app()
 
+time.sleep(10)
+# benchmark
+while True:
+    print("Benchmarking...")
+    ec2_manager.set_mode("DIRECT_HIT")
+    answers_direct_hit = ec2_manager.benchmark()
+    with open("data/benchmark_direct_hit.json", "w") as file:
+        json.dump(answers_direct_hit, file, indent=4)
+    print_stats(answers_direct_hit)
+
+    ec2_manager.set_mode("RANDOM")
+    answers_random = ec2_manager.benchmark()
+    with open("data/benchmark_random.json", "w") as file:
+        json.dump(answers_random, file, indent=4)
+    print_stats(answers_random)
+
+    ec2_manager.set_mode("CUSTOMIZED")
+    answers_customized = ec2_manager.benchmark()
+    with open("data/benchmark_customized.json", "w") as file:
+        json.dump(answers_customized, file, indent=4)
+    print_stats(answers_customized)
+
+    press_touched = input("Press`b` to benchmark again, any other to cleanup: ")
+    if press_touched != "b":
+        break
+
 # Cleanup
-press_touched = input("Press any key to terminate and cleanup: ")
 ec2_manager.cleanup(all_instances)
 print("Cleanup complete.")
