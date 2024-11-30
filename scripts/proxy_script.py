@@ -63,7 +63,13 @@ def query():
                 return jsonify(response_data), response.status_code
 
             elif mode == "RANDOM":
-                target = random.choice(list(public_ips))
+                # keep only workers in public ips
+                worker_ips = {
+                    key: value
+                    for key, value in public_ips.items()
+                    if key.startswith("worker")
+                }
+                target = random.choice(list(worker_ips.keys()))
                 ip = public_ips[target]
                 url = f"http://{ip}:5000/query"
                 response = requests.post(url, json={"query": query})
@@ -74,9 +80,13 @@ def query():
 
             elif mode == "CUSTOMIZED":
                 ping = {}
-                for key, ip in public_ips.items():
-                    if key.startswith("proxy"):
-                        continue
+                # keep only workers in public ips
+                worker_ips = {
+                    key: value
+                    for key, value in public_ips.items()
+                    if key.startswith("worker")
+                }
+                for key, ip in worker_ips.items():
                     try:
                         start_time = time.time()
                         requests.get(f"http://{ip}:5000/", timeout=2)
