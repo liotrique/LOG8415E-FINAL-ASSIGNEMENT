@@ -5,7 +5,6 @@ import logging
 
 app = Flask(__name__)
 
-# Set up logging
 logging.basicConfig(level=logging.INFO)
 
 # read "public_ips.json" file to get the public IPs of the workers

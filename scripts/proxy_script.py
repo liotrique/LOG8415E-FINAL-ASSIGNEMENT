@@ -5,12 +5,11 @@ from flask import Flask, request, jsonify
 import logging
 import random
 
-# "DIRECT_HIT", "RANDOM", "CUSTOMIZED"
+# "DIRECT_HIT", "RANDOM" or "CUSTOMIZED"
 mode = "DIRECT_HIT"
 
 app = Flask(__name__)
 
-# Set up logging
 logging.basicConfig(level=logging.INFO)
 
 # read "public_ips.json" file to get the public IPs of the workers

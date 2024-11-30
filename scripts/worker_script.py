@@ -11,7 +11,6 @@ app.config["MYSQL_DATABASE_PASSWORD"] = os.getenv("MYSQL_PASSWORD", "root_passwo
 app.config["MYSQL_DATABASE_DB"] = os.getenv("MYSQL_DB", "sakila")
 app.config["MYSQL_DATABASE_HOST"] = os.getenv("MYSQL_HOST", "localhost")
 
-# Set up logging
 logging.basicConfig(level=logging.INFO)
 
 
@@ -29,7 +28,6 @@ def query():
         if not query:
             return jsonify({"error": "No query provided"}), 400
 
-        # Check if the query is a read or write query
         is_write_query = (
             query.strip().lower().startswith(("insert", "update", "delete"))
         )
@@ -66,7 +64,7 @@ def query():
     finally:
         if conn:
             cursor.close()
-            conn.close()  # Ensure the connection is closed
+            conn.close()
 
 
 if __name__ == "__main__":

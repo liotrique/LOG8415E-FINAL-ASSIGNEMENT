@@ -21,6 +21,7 @@ class EC2Instance:
 
 # Function to create an SSH client
 def create_ssh_client(host, user, key_path):
+    """Create an SSH client using the provided host, user, and key path."""
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(hostname=host, username=user, key_filename=key_path)
@@ -28,7 +29,8 @@ def create_ssh_client(host, user, key_path):
 
 
 # Function to print stats from benchmark
-def print_stats(answers):
+def print_stats(answers: list[dict[str, Any]]) -> None:
+    """Print the number of requests and average response time per instance."""
 
     n_req_per_instance = {"manager": 0, "worker1": 0, "worker2": 0}
     n_time_per_instance = {"manager": 0, "worker1": 0, "worker2": 0}
@@ -55,7 +57,7 @@ def print_stats(answers):
 
 
 class EC2Manager:
-    def __init__(self):
+    def __init__(self) -> None:
         self.key_name = "temp_key_pair"
 
         # Clients and resources
@@ -93,7 +95,7 @@ class EC2Manager:
 
         self.ssh_key_path = os.path.expanduser(f"./{self.key_name}.pem")
 
-        # All instances
+        # All instances (instanciated in launch_instances)
         self.manager_instance: EC2Instance | None = None
         self.worker_instances: list[EC2Instance] | None = []
         self.proxy_instance: EC2Instance | None = None
@@ -101,6 +103,7 @@ class EC2Manager:
         self.trusted_host_instance: EC2Instance | None = None
 
     def create_key_pair(self) -> None:
+        """Create a new key pair and save the private key to a file."""
         response = self.ec2_client.create_key_pair(KeyName=self.key_name)
         private_key = response["KeyMaterial"]
         with open(f"{self.key_name}.pem", "w") as file:
@@ -108,7 +111,7 @@ class EC2Manager:
 
     def launch_instances(self) -> list[EC2Instance]:
         """
-        Launch manager, worker, and proxy instances
+        Launch manager, worker, and proxy instances.
         """
         # Launch worker instances
         for i in range(2):
@@ -235,7 +238,7 @@ class EC2Manager:
             self.gatekeeper_instance,
         ]
 
-    def add_inbound_rules(self):
+    def add_inbound_rules(self) -> None:
         """
         Add inbound rules for security groups
         """
@@ -335,8 +338,7 @@ class EC2Manager:
         print_output: bool = True,
     ) -> None:
         """
-        This function executes a list of commands on each instance.
-        You can call this function to run any set of commands.
+        This function executes a list of commands on each instance provided.
         """
         try:
             for ec2_instance in instances:
@@ -371,6 +373,7 @@ class EC2Manager:
             print(f"An error occurred: {e}")
 
     def install_cluster_dependencies(self) -> None:
+        """Install common dependencies on the manager and worker instances."""
         commands = [
             # Update and Install MySQL, sysbench, and Flask
             "sudo apt-get update",
@@ -406,6 +409,7 @@ class EC2Manager:
         )
 
     def install_network_instances_dependencies(self) -> None:
+        """Install common dependencies on the proxy, trusted host, and gatekeeper instances."""
         commands = [
             # Update and Install Python3 and flask
             "sudo apt-get update",
@@ -421,6 +425,7 @@ class EC2Manager:
         )
 
     def run_sys_bench(self) -> None:
+        """Run sysbench on the manager and worker instances."""
         sysbench_commands = [
             "sudo sysbench /usr/share/sysbench/oltp_read_only.lua --mysql-db=sakila --mysql-user='root' --mysql-password='root_password' prepare",
             "sudo sysbench /usr/share/sysbench/oltp_read_only.lua --mysql-db=sakila --mysql-user='root' --mysql-password='root_password' run > sysbench_results.txt",
@@ -433,6 +438,7 @@ class EC2Manager:
         )
 
     def save_sys_bench_results(self) -> None:
+        """Download the sysbench results from the manager and worker instances."""
         try:
             for ec2_instance in [self.manager_instance] + self.worker_instances:
                 # Connect to the instance
@@ -457,7 +463,8 @@ class EC2Manager:
             scp.close()
             ssh_client.close()
 
-    def upload_flask_apps_to_instances(self):
+    def upload_flask_apps_to_instances(self) -> None:
+        """Upload the corresponding script (of a Flask server) to each instance."""
         try:
             # Upload the Flask app to the manager instance
             ssh_client = create_ssh_client(
@@ -546,35 +553,34 @@ class EC2Manager:
             scp.close()
             ssh_client.close()
 
-    def start_db_cluster_apps(self):
-        # Start the Flask app on the manager instance
+    def start_db_cluster_apps(self) -> None:
+        """Start the Flask app on the manager and workers instances."""
         commands = [
             "nohup python3 manager_script.py > manager_output.log 2>&1 &",
         ]
         self.execute_commands(commands, [self.manager_instance])
 
-        # Start the Flask app on the worker instances
         commands = [
             "nohup python3 worker_script.py > worker_output.log 2>&1 &",
         ]
         self.execute_commands(commands, self.worker_instances)
 
     def start_proxy_app(self) -> None:
-        # Start the Flask app on the proxy instance
+        """Start the Flask app on the proxy instance."""
         commands = [
             "nohup python3 proxy_script.py > proxy_output.log 2>&1 &",
         ]
         self.execute_commands(commands, [self.proxy_instance])
 
     def start_trusted_host_app(self) -> None:
-        # Start the Flask app on the trusted host instance
+        """Start the Flask app on the trusted host instance."""
         commands = [
             "nohup python3 trusted_host_script.py > trusted_host_output.log 2>&1 &",
         ]
         self.execute_commands(commands, [self.trusted_host_instance])
 
     def start_gatekeeper_app(self) -> None:
-        # Start the Flask app on the gatekeeper instance
+        """Start the Flask app on the gatekeeper instance."""
         commands = [
             "nohup python3 gatekeeper_script.py > gatekeeper_output.log 2>&1 &",
         ]
@@ -622,12 +628,10 @@ class EC2Manager:
 
         return answers
 
-    def cleanup(self, all_instances: list[EC2Instance]):
+    def cleanup(self, all_instances: list[EC2Instance]) -> None:
         """
-        Delete the target groups, terminate all instances and delete the security group.
+        Delete the target groups, terminate all instances and delete the security groups.
 
-        Raises:
-            ClientError: When an error occurs when deleting resources.
         """
         try:
             # Terminate EC2 instance
@@ -665,7 +669,7 @@ class EC2Manager:
         except ClientError as e:
             print(f"An error occurred: {e}")
 
-    def _get_latest_ubuntu_ami(self):
+    def _get_latest_ubuntu_ami(self) -> str:
         """
         Get the latest Ubuntu AMI ID.
         """
@@ -712,7 +716,7 @@ time.sleep(10)
 
 ec2_manager.add_inbound_rules()
 
-# Save manager and worker ips to a JSON file
+# Save public ips to a JSON file
 instance_data = {}
 for ec2_instance in all_instances:
     instance_data[ec2_instance.name] = ec2_instance.instance.public_ip_address
@@ -748,6 +752,7 @@ print("Starting Flask app for the gatekeeper...")
 ec2_manager.start_gatekeeper_app()
 
 time.sleep(10)
+
 # benchmark
 while True:
     print("Benchmarking...")

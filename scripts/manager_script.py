@@ -13,7 +13,6 @@ app.config["MYSQL_DATABASE_PASSWORD"] = os.getenv("MYSQL_PASSWORD", "root_passwo
 app.config["MYSQL_DATABASE_DB"] = os.getenv("MYSQL_DB", "sakila")
 app.config["MYSQL_DATABASE_HOST"] = os.getenv("MYSQL_HOST", "localhost")
 
-# Set up logging
 logging.basicConfig(level=logging.INFO)
 
 # read "public_ips.json" file to get the public IPs of the workers
@@ -50,7 +49,7 @@ def query():
         cursor = conn.cursor()
 
         if is_write_query:
-            # For write queries, execute and commit the transaction
+            # For write queries, execute the query and commit the changes
             cursor.execute(query)
             conn.commit()
 
@@ -58,11 +57,11 @@ def query():
                 "Write query executed successfully by manager (replicated on workers)"
             )
 
-            # Contact the workers with the write query
+            # Contact the workers with the write query to replicate the changes
             for (
                 name,
                 ip,
-            ) in public_ips.items():  # Access both key (worker name) and value (IP)
+            ) in public_ips.items():
                 if not name.startswith("worker"):
                     continue
                 response = requests.post(
@@ -97,7 +96,7 @@ def query():
     finally:
         if conn:
             cursor.close()
-            conn.close()  # Ensure the connection is closed
+            conn.close()
 
 
 if __name__ == "__main__":
