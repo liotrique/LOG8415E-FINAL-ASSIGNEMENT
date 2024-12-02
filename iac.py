@@ -693,7 +693,6 @@ class EC2Manager:
 
 # Main
 
-# Launch instances
 ec2_manager = EC2Manager()
 
 # Clear data folder
@@ -702,6 +701,7 @@ os.system("mkdir data")
 
 ec2_manager.create_key_pair()
 time.sleep(5)
+print("Launching instances...")
 all_instances = ec2_manager.launch_instances()
 
 # Wait for instances to be running
@@ -781,3 +781,4 @@ while True:
 # Cleanup
 ec2_manager.cleanup(all_instances)
 print("Cleanup complete.")
+
